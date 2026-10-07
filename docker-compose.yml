@@ -1,0 +1,203 @@
+# ═══════════════════════════════════════════════════════════════════════════
+#  Offer Letter Studio — R&D stack
+#
+#      make up        build and run everything
+#      make down      stop
+#      make logs      follow
+#
+#  Everything comes from .env. The topology mirrors what would land in HELIX,
+#  so what is proved here transfers rather than needing translation.
+# ═══════════════════════════════════════════════════════════════════════════
+
+name: studio
+
+x-restart: &restart
+  restart: unless-stopped
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+
+  # ───────────────────────────── data ─────────────────────────────
+  postgres:
+    image: postgres:18-trixie
+    mem_limit: 512m
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Mounted at the path the image itself declares as a VOLUME. Mounting
+      # inside it makes Docker create a root-owned directory on a fresh volume,
+      # and initdb then fails with "Permission denied" — on first run only,
+      # which is why an existing volume hides it completely.
+      PGDATA: /var/lib/postgresql/pgdata
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB} -q"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [studio]
+    <<: [*restart, *logging]
+
+  # Object storage. Documents live here, not on a container filesystem — the API
+  # is stateless and replaceable, but a lawyer-approved .docx must outlive the
+  # container that received it. Same choice HELIX already made.
+  minio:
+    # MinIO pulled all community images from Docker Hub and Quay.io on
+    # 2025-10-23 with no notice, so `minio/minio` and `quay.io/minio/minio`
+    # both now 401. This is Chainguard's free, actively-rebuilt mirror —
+    # same entrypoint and `mc` binary, nothing else changes.
+    image: cgr.dev/chainguard/minio:latest
+    mem_limit: 512m
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    networks: [studio]
+    <<: [*restart, *logging]
+
+  # ─────────────────────────── document services ───────────────────────────
+
+  # Renders .docx -> PDF through LibreOffice. Gotenberg owns the process pool,
+  # the restart policy and the queue, which is what makes headless LibreOffice
+  # survivable under concurrency.
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    mem_limit: 768m
+    command:
+      - gotenberg
+      - --libreoffice-auto-start=true
+      - --libreoffice-restart-after=10
+      - --api-timeout=120s
+      # No Chromium routes: this stack never renders HTML to PDF, and leaving
+      # them enabled is an SSRF surface for nothing in return.
+      - --chromium-disable-javascript=true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [studio]
+    <<: [*restart, *logging]
+
+  # ONLYOFFICE Docs 9.4 Community — the view/edit surface.
+  #
+  # 9.4 (May 2026) removed the 20-connection limit and the RabbitMQ/PostgreSQL/
+  # Redis dependencies, so this is a single container. It is run STRICTLY
+  # UNMODIFIED: the AGPL additional terms forbid stripping attribution, and
+  # Community reports branding:false so it could not be white-labelled anyway.
+  onlyoffice:
+    image: onlyoffice/documentserver:9.4
+    mem_limit: 2g
+    environment:
+      JWT_ENABLED: "true"
+      JWT_SECRET: ${ONLYOFFICE_JWT_SECRET}
+      JWT_HEADER: Authorization
+      # Document Server must reach the API by its compose name to download a
+      # file. Without this it refuses private addresses and every open fails
+      # with a bare "download failed".
+      ALLOW_PRIVATE_IP_ADDRESS: "true"
+      ALLOW_META_IP_ADDRESS: "false"
+    ports:
+      # Published directly, NOT proxied. Document Server builds absolute URLs
+      # for its own cache from the Host header it receives, and a reverse proxy
+      # that drops the port makes it emit http://localhost/cache/... — a
+      # different origin from the one the editor loaded on, which the browser
+      # then blocks as CORS. Serving it on its own port removes the whole class
+      # of proxy-header bugs, and it is already a separate origin by design.
+      - "127.0.0.1:${ONLYOFFICE_PORT}:80"
+    volumes:
+      - onlyoffice-data:/var/www/onlyoffice/Data
+      - onlyoffice-log:/var/log/onlyoffice
+      - onlyoffice-cache:/var/lib/onlyoffice/documentserver/App_Data/cache/files
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1/healthcheck | grep -q true"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    networks: [studio]
+    <<: [*restart, *logging]
+
+  # ───────────────────────────── application ─────────────────────────────
+  api:
+    build: { context: ./backend }
+    image: studio/api:latest
+    mem_limit: 512m
+    env_file: [.env]
+    environment:
+      POSTGRES_HOST: postgres
+      S3_ENDPOINT_URL: http://minio:9000
+      ONLYOFFICE_INTERNAL_URL: http://onlyoffice
+      API_INTERNAL_URL: http://api:8000
+      GOTENBERG_URL: http://gotenberg:3000
+    depends_on:
+      postgres: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      gotenberg: { condition: service_healthy }
+    networks: [studio]
+    <<: [*restart, *logging]
+
+  web:
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        NEXT_PUBLIC_ONLYOFFICE_URL: ${ONLYOFFICE_PUBLIC_URL}
+    image: studio/web:latest
+    mem_limit: 512m
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+      API_INTERNAL_URL: http://api:8000
+    depends_on:
+      api: { condition: service_started }
+    networks: [studio]
+    <<: [*restart, *logging]
+
+  # ───────────────────────────── edge ─────────────────────────────
+  # One origin for the app and the API, so no CORS exists here that would not
+  # exist inside HELIX. ONLYOFFICE keeps its own port: the editor iframe must
+  # come from a distinct origin so a compromise there cannot read the app's
+  # cookies.
+  caddy:
+    image: caddy:2-alpine
+    mem_limit: 128m
+    ports:
+      - "127.0.0.1:${STUDIO_PORT}:80"
+    volumes:
+      - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      api: { condition: service_started }
+      web: { condition: service_started }
+    networks: [studio]
+    <<: [*restart, *logging]
+
+networks:
+  studio:
+    driver: bridge
+
+volumes:
+  pgdata:
+  miniodata:
+  onlyoffice-data:
+  onlyoffice-log:
+  onlyoffice-cache:
+  caddy-data:

@@ -1,0 +1,151 @@
+# ═══════════════════════════════════════════════════════════════════════════
+#  Sensitive & Local Files (NEVER push to git)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Environment files (ALL variants — development, testing, production)
+.env
+.env.local
+.env.*.local
+.env.development.local
+.env.test.local
+.env.production.local
+docker-compose.local.yml
+docker-compose.override.yml
+
+# Secrets and credentials
+.secrets/
+secrets/
+*.pem
+*.key
+*.crt
+*.pfx
+*.p12
+*.p8
+.ssh/
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Dependencies
+# ═══════════════════════════════════════════════════════════════════════════
+
+node_modules/
+.pnp
+.pnp.js
+package-lock.json.bak
+yarn.lock.bak
+pnpm-lock.yaml.bak
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+*.so
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Build & Generated Files
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Next.js
+.next/
+.next/**
+out/
+.vercel/
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Local Development & Docker
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Data volumes (local development only)
+data/
+pgdata/
+miniodata/
+onlyoffice-data/
+onlyoffice-log/
+onlyoffice-cache/
+caddy-data/
+
+# Docker
+.dockerignore
+docker-compose.yml.bak
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  IDE & Editor Settings (local only)
+# ═══════════════════════════════════════════════════════════════════════════
+
+.claude/
+.qodo/
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json.example
+
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Logs & Temporary Files
+# ═══════════════════════════════════════════════════════════════════════════
+
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Sample/Test Files (as mentioned in original)
+# ═══════════════════════════════════════════════════════════════════════════
+
+samples/*.docx
+test-results/
+coverage/
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  OS-Specific
+# ═══════════════════════════════════════════════════════════════════════════
+
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.env.swp
+.terraform/
+.terraform.lock.hcl

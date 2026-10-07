@@ -1,0 +1,203 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ==========================================================================
+   Design tokens
+   One neutral ramp, one accent, four status colours. Both themes are defined
+   under explicit selectors — a media-query-only theme silently ignores the
+   toggle, so choosing light on a dark OS would do nothing.
+   ========================================================================== */
+
+:root {
+  --bg: 249 250 251;
+  --surface: 255 255 255;
+  --surface2: 244 245 247;
+  --surface3: 236 238 241;
+  --line: 226 229 234;
+  --line-strong: 209 213 219;
+  --ink: 17 24 39;
+  --ink2: 75 85 99;
+  --ink3: 148 156 168;
+  --accent: 79 70 229;
+  --accent-ink: 255 255 255;
+  --good: 5 150 105;
+  --warn: 217 119 6;
+  --bad: 220 38 38;
+
+  --ring: 0 0 0 3px rgb(var(--accent) / 0.16);
+  --shadow-sm: 0 1px 2px rgb(17 24 39 / 0.06), 0 1px 1px rgb(17 24 39 / 0.04);
+  --shadow-md: 0 4px 12px rgb(17 24 39 / 0.08), 0 1px 3px rgb(17 24 39 / 0.05);
+  --shadow-lg: 0 12px 32px rgb(17 24 39 / 0.12), 0 2px 8px rgb(17 24 39 / 0.06);
+}
+
+:root[data-theme='dark'] {
+  --bg: 10 12 16;
+  --surface: 19 22 28;
+  --surface2: 26 30 38;
+  --surface3: 34 39 49;
+  --line: 39 45 56;
+  --line-strong: 55 63 77;
+  --ink: 237 240 245;
+  --ink2: 160 169 184;
+  --ink3: 113 122 137;
+  --accent: 129 124 255;
+  --accent-ink: 12 14 20;
+  --good: 52 199 143;
+  --warn: 245 176 65;
+  --bad: 248 113 113;
+
+  --ring: 0 0 0 3px rgb(var(--accent) / 0.24);
+  --shadow-sm: none;
+  --shadow-md: 0 4px 14px rgb(0 0 0 / 0.4);
+  --shadow-lg: 0 16px 40px rgb(0 0 0 / 0.55);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: 10 12 16; --surface: 19 22 28; --surface2: 26 30 38; --surface3: 34 39 49;
+    --line: 39 45 56; --line-strong: 55 63 77;
+    --ink: 237 240 245; --ink2: 160 169 184; --ink3: 113 122 137;
+    --accent: 129 124 255; --accent-ink: 12 14 20;
+    --good: 52 199 143; --warn: 245 176 65; --bad: 248 113 113;
+    --ring: 0 0 0 3px rgb(129 124 255 / 0.24);
+    --shadow-sm: none;
+    --shadow-md: 0 4px 14px rgb(0 0 0 / 0.4);
+    --shadow-lg: 0 16px 40px rgb(0 0 0 / 0.55);
+  }
+}
+
+/* ── base ─────────────────────────────────────────────────────────────────── */
+
+* { border-color: rgb(var(--line)); }
+html, body { height: 100%; }
+
+body {
+  background: rgb(var(--bg));
+  color: rgb(var(--ink));
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* One visible focus treatment everywhere. Keyboard users get a ring; mouse
+   users do not, which is what :focus-visible is for. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+  border-radius: 8px;
+}
+
+::selection { background: rgb(var(--accent) / 0.22); }
+
+/* Scrollbars that belong to the theme rather than the OS. */
+* { scrollbar-width: thin; scrollbar-color: rgb(var(--line-strong)) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--line-strong)); border-radius: 99px;
+  border: 3px solid rgb(var(--bg));
+}
+::-webkit-scrollbar-thumb:hover { background: rgb(var(--ink3)); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+
+/* ── components ───────────────────────────────────────────────────────────── */
+
+@layer components {
+  .card {
+    @apply rounded-xl border bg-surface;
+    box-shadow: var(--shadow-sm);
+  }
+  .card-hover { @apply transition-[box-shadow,transform,border-color] duration-150; }
+  .card-hover:hover { box-shadow: var(--shadow-md); border-color: rgb(var(--line-strong)); }
+
+  .card-head {
+    @apply flex items-center gap-3 border-b px-5 py-3.5;
+  }
+  .card-title { @apply text-[0.9rem] font-semibold tracking-[-0.01em]; }
+
+  /* buttons ---------------------------------------------------------------- */
+  .btn {
+    @apply inline-flex select-none items-center justify-center gap-2 whitespace-nowrap
+           rounded-lg border bg-surface px-3 py-2 text-[0.85rem] font-medium text-ink
+           transition-colors duration-150;
+  }
+  .btn:hover:not(:disabled) { background: rgb(var(--surface2)); border-color: rgb(var(--line-strong)); }
+  .btn:active:not(:disabled) { background: rgb(var(--surface3)); }
+  .btn:disabled { @apply cursor-not-allowed opacity-45; }
+  .btn svg { @apply h-[15px] w-[15px] shrink-0; }
+
+  .btn-primary {
+    background: rgb(var(--accent)); border-color: rgb(var(--accent));
+    color: rgb(var(--accent-ink));
+  }
+  .btn-primary:hover:not(:disabled) { background: rgb(var(--accent) / 0.88); border-color: transparent; }
+  .btn-danger { color: rgb(var(--bad)); border-color: rgb(var(--bad) / 0.35); }
+  .btn-danger:hover:not(:disabled) { background: rgb(var(--bad) / 0.08); border-color: rgb(var(--bad)); }
+  .btn-ghost { @apply border-transparent bg-transparent text-ink2; }
+  .btn-ghost:hover:not(:disabled) { background: rgb(var(--surface2)); color: rgb(var(--ink)); }
+  .btn-sm { @apply gap-1.5 px-2.5 py-1.5 text-[0.78rem]; }
+  .btn-sm svg { @apply h-3.5 w-3.5; }
+
+  /* form ------------------------------------------------------------------- */
+  .input {
+    @apply w-full rounded-lg border bg-surface px-3 py-2 text-[0.85rem] text-ink
+           transition-colors duration-150 placeholder:text-ink3;
+  }
+  .input:hover:not(:focus) { border-color: rgb(var(--line-strong)); }
+  .input:focus { outline: none; border-color: rgb(var(--accent)); box-shadow: var(--ring); }
+  .input:disabled { @apply cursor-not-allowed opacity-55; }
+  select.input { @apply cursor-pointer pr-8; }
+  textarea.input { @apply leading-relaxed; }
+
+  .label { @apply mb-1.5 block text-[0.78rem] font-medium text-ink2; }
+  .hint-text { @apply mt-1.5 block text-[0.72rem] leading-relaxed text-ink3; }
+
+  /* data ------------------------------------------------------------------- */
+  .table { @apply w-full border-collapse text-[0.85rem]; }
+  .table thead th {
+    @apply sticky top-0 z-10 border-b bg-surface2 px-4 py-2.5 text-left text-[0.68rem]
+           font-semibold uppercase tracking-[0.06em] text-ink3;
+  }
+  .table tbody td { @apply border-b px-4 py-3 align-middle; }
+  .table tbody tr:last-child td { @apply border-b-0; }
+  .table tbody tr { @apply transition-colors duration-100; }
+  .table tbody tr:hover { background: rgb(var(--surface2) / 0.7); }
+
+  .pill {
+    @apply inline-flex items-center gap-1 rounded-full border bg-surface2 px-2 py-0.5
+           text-[0.7rem] font-medium text-ink2;
+  }
+  .pill-good { background: rgb(var(--good) / 0.12); color: rgb(var(--good)); border-color: transparent; }
+  .pill-warn { background: rgb(var(--warn) / 0.13); color: rgb(var(--warn)); border-color: transparent; }
+  .pill-bad  { background: rgb(var(--bad) / 0.12);  color: rgb(var(--bad));  border-color: transparent; }
+  .pill-accent { background: rgb(var(--accent) / 0.13); color: rgb(var(--accent)); border-color: transparent; }
+
+  .token {
+    @apply inline-block rounded px-1.5 py-0.5 font-mono text-[0.7rem] font-medium;
+    background: rgb(var(--accent) / 0.12); color: rgb(var(--accent));
+  }
+  .token-bad { background: rgb(var(--bad) / 0.12); color: rgb(var(--bad)); }
+  .token-muted { background: rgb(var(--surface3)); color: rgb(var(--ink3)); }
+
+  .stat { @apply card p-4; }
+  .stat-value { @apply text-[1.6rem] font-semibold leading-none tracking-[-0.02em]; }
+  .stat-label { @apply mt-1.5 block text-[0.72rem] text-ink3; }
+
+  /* skeleton --------------------------------------------------------------- */
+  .skeleton {
+    @apply rounded-md;
+    background: linear-gradient(90deg,
+      rgb(var(--surface2)) 25%, rgb(var(--surface3)) 37%, rgb(var(--surface2)) 63%);
+    background-size: 400% 100%;
+    animation: shimmer 1.4s ease-in-out infinite;
+  }
+  @keyframes shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+}
+
+/* ── document surfaces ────────────────────────────────────────────────────── */
+/* A letter is never themed. */
+iframe { background: #fff; color-scheme: light; border-radius: 8px; }
