@@ -114,6 +114,27 @@ export function Hint({ tone = 'info', title, children }: {
   );
 }
 
+/** Segmented control for a small, fixed set of mutually-exclusive options. */
+export function ToggleGroup({ value, onChange, options, label }: {
+  value: string; onChange: (v: string) => void;
+  options: { value: string; label: string }[]; label?: string;
+}) {
+  return (
+    <div className="flex rounded-lg border border-line p-0.5" role="radiogroup" aria-label={label}>
+      {options.map((opt) => (
+        <button key={opt.value} type="button" role="radio" aria-checked={value === opt.value}
+          onClick={() => onChange(opt.value)}
+          className={clsx(
+            'flex-1 whitespace-nowrap rounded-md px-3 py-1.5 text-[0.8rem] font-medium transition-colors',
+            value === opt.value ? 'bg-accent text-accent-ink' : 'text-ink2 hover:bg-surface2')}
+          style={value === opt.value ? { color: 'rgb(var(--accent-ink))' } : undefined}>
+          {opt.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /** A button that owns its own pending state, so every caller gets the same one. */
 export function Busy({ pending, children, ...rest }: {
   pending?: boolean; children: React.ReactNode;

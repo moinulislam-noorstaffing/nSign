@@ -2,7 +2,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
-import { Building2, FileText, Image as ImageIcon, LayoutGrid, Menu, Sparkles, X } from 'lucide-react';
+import { Building2, FilePlus2, FileText, Image as ImageIcon, LayoutGrid, Menu, Sparkles, X } from 'lucide-react';
 import { useState } from 'react';
 import clsx from 'clsx';
 import { api } from '@/lib/api';
@@ -12,6 +12,9 @@ const GROUPS: [string, { href: string; label: string; icon: typeof FileText; bad
   ['Library', [
     { href: '/templates', label: 'Offer templates', icon: FileText, badge: 'templates' },
     { href: '/assets', label: 'Logos', icon: ImageIcon, badge: 'assets' },
+  ]],
+  ['Offer letters', [
+    { href: '/offers/new', label: 'Generate letter', icon: FilePlus2 },
   ]],
   ['Organisation', [
     { href: '/companies', label: 'Legal entities', icon: Building2, badge: 'companies' },

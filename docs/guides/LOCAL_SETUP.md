@@ -80,7 +80,7 @@ All services should show `healthy` or `running` status.
 
 - **Studio UI**: http://localhost:8900
 - **ONLYOFFICE Editor**: http://localhost:8090
-- **MinIO Console**: http://localhost:9001
+- **MinIO Console**: not published to the host by default — see [Storage/MinIO Issues](#storageminio-issues)
 - **API Docs**: http://localhost:8000/api/docs
 - **API Health**: http://localhost:8000/api/health
 
@@ -278,10 +278,12 @@ grep ONLYOFFICE_JWT_SECRET .env
 ### Storage/MinIO Issues
 
 ```bash
-# Access MinIO console
-# Open: http://localhost:9001
-# Username: minioadmin
-# Password: minioadmin
+# MinIO has no host port mapping by default. Browse it from inside the container:
+docker compose exec minio sh -c 'mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" && mc ls local'
+
+# Browser console: publish 9001 in docker-compose.local.yml, then open
+# http://localhost:9001 and log in with S3_ACCESS_KEY / S3_SECRET_KEY from .env
+# (not minioadmin).
 
 # Check storage logs
 make logs s=minio
