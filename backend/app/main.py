@@ -16,27 +16,33 @@ PandaDoc receives a finished PDF, because it detects zero merge fields in a
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import logging
 import pathlib
 import re
 import unicodedata
+import uuid
 from urllib.parse import quote
 from typing import Any
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai, docx_compose, docx_html, ooxml_merge, services
+from app import ai, docx_compose, docx_html, offer_letter, ooxml_merge, services
 from app.config import settings
 from app.db import (
     AiRun, Asset, Branch, Company, Template, TemplateBranch, TemplateVersion,
     create_all, get_session,
 )
+
+logger = logging.getLogger("studio")
 
 app = FastAPI(title=settings.app_name, version="2.0.0")
 
@@ -127,8 +133,32 @@ def content_disposition(filename: str, inline: bool = False) -> str:
     return f"{kind}; filename=\"{ascii_name}\"; filename*=UTF-8''{quoted}"
 
 
-def fail(message: str, status: int = 400) -> JSONResponse:
-    return JSONResponse({"ok": False, "error": message}, status_code=status)
+def fail(message: str, status: int = 400, **extra: Any) -> JSONResponse:
+    return JSONResponse({"ok": False, "error": message, **extra}, status_code=status)
+
+
+@app.exception_handler(RequestValidationError)
+async def _invalid_request(_: Request, exc: RequestValidationError) -> JSONResponse:
+    """FastAPI's default 422 is a nested list the UI would print as '[object Object]'."""
+    issues = []
+    for e in exc.errors():
+        if e.get("type") == "json_invalid":
+            issues.append({"severity": "error", "field": "body",
+                           "message": "The request body is not valid JSON."})
+            continue
+        issues.append({"severity": "error",
+                       "field": ".".join(str(p) for p in e.get("loc", ())[1:]) or "request",
+                       "message": str(e.get("msg", "invalid"))})
+    summary = "; ".join(f"{i['field']}: {i['message']}" for i in issues[:4])
+    return fail(f"Invalid request: {summary}", 422, issues=issues)
+
+
+@app.exception_handler(Exception)
+async def _unexpected(request: Request, exc: Exception) -> JSONResponse:
+    """Last resort. The reference ties what the user saw to the stack in the log."""
+    ref = uuid.uuid4().hex[:8]
+    logger.exception("Unhandled error ref=%s %s %s", ref, request.method, request.url.path)
+    return fail(f"Unexpected server error (ref {ref}). The details are in the API log.", 500)
 
 
 # ─────────────────────────────── health ────────────────────────────────────
@@ -375,9 +405,15 @@ async def asset_delete(asset_id: str, session: AsyncSession = Depends(get_sessio
 
 # ─────────────────────────────── templates ─────────────────────────────────
 
+#: Stored in `notes` so a finished letter can be told apart from a reusable
+#: template without a schema change (create_all cannot alter an existing table).
+GENERATED_MARKER = "generated-offer-letter"
+
+
 def _template_json(t: Template, tokens: list[str] | None = None) -> dict[str, Any]:
     return {
         "id": t.id, "name": t.name, "category": t.category, "subdivision": t.subdivision,
+        "generated": t.notes == GENERATED_MARKER,
         "company_id": t.company_id,
         "company": {"id": t.company.id, "legal_name": t.company.legal_name,
                     "fein": t.company.fein} if t.company else None,
@@ -948,17 +984,19 @@ async def ai_compose(body: ComposeIn, session: AsyncSession = Depends(get_sessio
     stray = ai.stray_placeholders(result)
 
     logo_bytes = None
+    logo_name = ""
     if body.logo_asset_id:
         asset = await session.get(Asset, body.logo_asset_id)
         if asset:
             logo_bytes = await services.get_object(asset.filename)
+            logo_name = asset.name
 
     donor_parsed = docx_html.to_html(donor_bytes)
     donor_text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", donor_parsed["html"]))
     braced = docx_compose.uses_braced_placeholders(donor_text)
 
     try:
-        built = docx_compose.compose(donor_bytes, result["blocks"], logo=logo_bytes,
+        built = docx_compose.compose(donor_bytes, result["blocks"], logo=logo_bytes, logo_name=logo_name,
                                      bare_placeholders=not braced)
     except docx_compose.ComposeError as exc:
         return fail(str(exc))
@@ -1178,13 +1216,15 @@ async def ai_chat_commit(body: CommitIn,
         return fail("the draft has no content yet")
 
     logo_bytes = None
+    logo_name = ""
     if body.logo_asset_id:
         asset = await session.get(Asset, body.logo_asset_id)
         if asset:
             logo_bytes = await services.get_object(asset.filename)
+            logo_name = asset.name
 
     try:
-        built = docx_compose.compose(donor_bytes, blocks, logo=logo_bytes,
+        built = docx_compose.compose(donor_bytes, blocks, logo=logo_bytes, logo_name=logo_name,
                                      bare_placeholders=not braced)
     except docx_compose.ComposeError as exc:
         return fail(str(exc))
@@ -1221,3 +1261,263 @@ async def ai_chat_commit(body: CommitIn,
                             "placeholder_style": built["placeholder_style"],
                             "logo_replaced": built["logo_replaced"],
                             "parts_inherited": len(built["kept_parts"])}}
+
+
+# ───────────────────────────── offer letters ───────────────────────────────
+#
+# Generating a letter never calls a model. Parsing a compensation description
+# does, but only to SUGGEST a structure that a person reviews; what is generated
+# is that reviewed structure, validated again server-side.
+
+async def _template_docx(session: AsyncSession, template_id: str) -> tuple[Template, bytes]:
+    t = await session.get(Template, template_id)
+    if not t or not t.source_path:
+        raise HTTPException(404, "That template has no original .docx.")
+    try:
+        return t, await services.get_object(t.source_path)
+    except Exception as exc:     # boto raises many types; all of them mean "cannot read it"
+        logger.exception("Could not read template %s from storage", template_id)
+        raise HTTPException(503, "Could not read the template from storage. Is MinIO running?") from exc
+
+
+@app.get("/api/offers/templates/{template_id}/inspect")
+async def offer_template_inspect(template_id: str,
+                                 session: AsyncSession = Depends(get_session)) -> Any:
+    """Which parts of a template the generator can fill — checked when it is picked."""
+    t, data = await _template_docx(session, template_id)
+    try:
+        info = offer_letter.inspect_template(data)
+    except offer_letter.OfferError as exc:
+        return fail(str(exc), exc.status, issues=exc.issues)
+    return {"ok": True, "template": {"id": t.id, "name": t.name}, **info}
+
+
+class CompensationParseIn(BaseModel):
+    text: str = Field(min_length=1, max_length=ai.MAX_COMPENSATION_CHARS)
+    job_title: str = Field(default="", max_length=120)
+    employment_type: str = Field(default="", max_length=10)
+
+
+@app.post("/api/offers/compensation/parse")
+async def offer_compensation_parse(body: CompensationParseIn,
+                                   session: AsyncSession = Depends(get_session)) -> Any:
+    text = body.text.strip()
+    if not text:
+        return fail("Describe the compensation first.", 422)
+    if not ai.configured():
+        return fail("AI is not configured (OPENAI_API_KEY is not set). "
+                    "Enter the compensation manually instead.", 503)
+    try:
+        out = await ai.parse_compensation(text=text, job_title=body.job_title.strip(),
+                                          employment_type=body.employment_type.strip())
+    except ai.PIIFound as exc:
+        return fail(str(exc), 409, pii=exc.findings)
+    except ai.AIError as exc:
+        return fail(str(exc), 502)
+
+    suggestion = out["result"]
+    issues: list[dict[str, str]] = [
+        {"severity": "warning", "field": str(r.get("field", "")), "message": f"AI: {r.get('issue', '')}"}
+        for r in suggestion.get("needs_review") or []]
+
+    # What the text says about pay frequency is decided here, not by the model.
+    freqs = offer_letter.frequencies_in_text(text)
+    model_freq = suggestion.get("pay_frequency_mentioned")
+    suggestion["pay_frequency_mentioned"] = freqs[0] if len(freqs) == 1 else None
+    if len(freqs) > 1:
+        issues.append({"severity": "warning", "field": "pay_frequency_mentioned",
+                       "message": f"The text mentions several pay frequencies ({', '.join(freqs)}). Confirm which applies."})
+    elif model_freq and model_freq != suggestion["pay_frequency_mentioned"]:
+        issues.append({"severity": "warning", "field": "pay_frequency_mentioned",
+                       "message": f"The AI reported '{model_freq}' but the text does not say so; ignored."})
+
+    compensation = {k: suggestion.get(k) for k in ("base", "commission", "overtime", "pay_frequency_mentioned")}
+    clean, check_issues = offer_letter.check_compensation(compensation)
+    issues += check_issues
+    if clean is not None:
+        for field, value in offer_letter.unverified_numbers(clean, text):
+            issues.append({"severity": "warning", "field": field,
+                           "message": f"{value:,.2f} does not appear in the text you wrote. Check it."})
+
+    run = AiRun(operation="comp_parse", model=out.get("model") or "",
+                prompt_sha256=out["prompt_sha256"],
+                tokens_used=(out.get("usage") or {}).get("total_tokens", 0),
+                result={"suggestion": compensation, "issues": issues, "source_chars": len(text)})
+    try:
+        session.add(run)
+        await session.commit()
+    except Exception as exc:
+        await session.rollback()
+        logger.exception("Could not record the compensation AI run")
+        return fail("The AI answered but the run could not be recorded, so it was discarded. Try again.", 503)
+    return {"ok": True, "run_id": run.id,
+            "compensation": clean if clean is not None else compensation, "issues": issues,
+            "model": out.get("model"), "usage": out.get("usage")}
+
+
+def _letter_category(fields: dict[str, str], comp: dict[str, Any]) -> str:
+    if fields["employment_type"] == "1099":
+        return "contractor"
+    if comp.get("commission"):
+        return "commission"
+    return "hourly" if comp["base"]["type"] == "hourly" else "salary"
+
+
+async def _save_generated_letter(session: AsyncSession, *, company: Company,
+                                 fields: dict[str, str], comp: dict[str, Any],
+                                 docx: bytes) -> dict[str, Any]:
+    """Keep the finished letter in the Offer templates list.
+
+    Generating the same letter twice yields byte-identical output, so an exact
+    repeat reuses the existing entry instead of piling up duplicates.
+    """
+    name = f"Offer Letter for {fields['job_title']} {fields['employee_name']}"[:255]
+    digest = hashlib.sha256(docx).hexdigest()
+    existing = await session.scalar(
+        select(Template).where(Template.name == name, Template.source_sha256 == digest,
+                               Template.notes == GENERATED_MARKER))
+    if existing:
+        return {"id": existing.id, "name": existing.name, "reused": True}
+
+    t = Template(name=name, company_id=company.id, notes=GENERATED_MARKER,
+                 category=_letter_category(fields, comp), subdivision="",
+                 source_filename=f"{name}.docx")
+    key: str | None = None
+    try:
+        session.add(t)
+        await session.flush()
+        key = services.source_key(t.id, 1)
+        stored = await services.put_object(key, docx, DOCX_MIME)
+        t.source_path, t.source_sha256 = key, stored
+        session.add(TemplateVersion(template_id=t.id, version=1, source_path=key, sha256=stored,
+                                    note="generated offer letter"))
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        if key:
+            try:
+                await services.delete_object(key)
+            except Exception:
+                logger.exception("Could not remove the orphaned object %s", key)
+        raise
+    return {"id": t.id, "name": t.name, "reused": False}
+
+
+class OfferGenerateIn(BaseModel):
+    template_id: str = Field(min_length=1, max_length=32)
+    company_id: str = Field(min_length=1, max_length=32)
+    fields: dict[str, Any]
+    compensation: dict[str, Any]
+    include_pdf: bool = True
+    compensation_run_id: str = Field(default="", max_length=32)
+    accepted_by: str = Field(default="HR", max_length=120)
+    #: Empty keeps the logo the template already has.
+    logo_asset_id: str = Field(default="", max_length=32)
+
+
+@app.post("/api/offers/generate")
+async def offer_generate(body: OfferGenerateIn,
+                         session: AsyncSession = Depends(get_session)) -> Any:
+    t, data = await _template_docx(session, body.template_id)
+    company = await session.get(Company, body.company_id)
+    if not company:
+        return fail("Choose a company from the list.", 422,
+                    issues=[{"severity": "error", "field": "company_id", "message": "Unknown company."}])
+
+    warnings: list[dict[str, str]] = []
+    if company.confirmed_at is None:
+        warnings.append({"severity": "warning", "field": "company_id",
+                         "message": f"'{company.legal_name}' has not been confirmed on the Legal entities page. "
+                                    "A wrong legal name on a binding offer is the failure that page exists to prevent."})
+    if t.company_id and t.company_id != company.id:
+        warnings.append({"severity": "warning", "field": "template",
+                         "message": "This template belongs to a different legal entity than the one chosen."})
+    if not t.is_active:
+        warnings.append({"severity": "warning", "field": "template", "message": "This template is marked inactive."})
+
+    # Report EVERY problem at once, form and compensation together.
+    problems: list[dict[str, str]] = []
+    fields: dict[str, str] | None = None
+    try:
+        fields, field_warnings = offer_letter.clean_fields(body.fields, company.legal_name)
+        warnings += field_warnings
+    except offer_letter.ValidationFailed as exc:
+        problems += exc.issues
+    comp, comp_issues = offer_letter.check_compensation(body.compensation)
+    problems += [i for i in comp_issues if i["severity"] == "error"]
+    warnings += [i for i in comp_issues if i["severity"] != "error"]
+    logo_bytes: bytes | None = None
+    logo_name = ""
+    if body.logo_asset_id:
+        asset = await session.get(Asset, body.logo_asset_id)
+        if asset is None:
+            problems.append({"severity": "error", "field": "logo_asset_id",
+                             "message": "That logo no longer exists. Choose another."})
+        else:
+            try:
+                logo_bytes = await services.get_object(asset.filename)
+            except Exception:
+                logger.exception("Could not read logo asset %s", asset.id)
+                return fail("Could not read the logo from storage. Is MinIO running?", 503)
+            logo_name = asset.name
+
+    if fields is None or comp is None or problems:
+        return fail("The letter was not generated: "
+                    + "; ".join(i["message"] for i in problems[:4])
+                    + (f" (+{len(problems) - 4} more)" if len(problems) > 4 else ""),
+                    422, issues=problems)
+
+    try:
+        result = offer_letter.generate(data, fields, comp, logo=logo_bytes, logo_name=logo_name)
+    except offer_letter.OfferError as exc:
+        if isinstance(exc, offer_letter.IntegrityFailure):
+            logger.error("Integrity check failed for template %s: %s", t.id, exc)
+        return fail(str(exc), exc.status, issues=exc.issues)
+
+    if body.compensation_run_id:
+        run = await session.get(AiRun, body.compensation_run_id)
+        if run is None or run.operation != "comp_parse":
+            warnings.append({"severity": "warning", "field": "compensation_run_id",
+                             "message": "The AI run for this compensation was not found; its review was not recorded."})
+        elif run.accepted_at is None:
+            try:
+                run.accepted_at = func.now()
+                run.accepted_by = body.accepted_by.strip() or "HR"
+                run.result = {**(run.result or {}), "final_compensation": comp}
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                logger.exception("Could not record acceptance of AI run %s", body.compensation_run_id)
+                return fail("The letter was built but the AI review could not be recorded, so nothing "
+                            "was released. Try again.", 503)
+
+    saved: dict[str, Any] | None = None
+    try:
+        saved = await _save_generated_letter(session, company=company, fields=fields,
+                                             comp=comp, docx=result["docx"])
+    except Exception:
+        logger.exception("Could not save the generated letter to the template list")
+        warnings.append({"severity": "warning", "field": "saved",
+                         "message": "The letter was generated but could not be added to the Offer "
+                                    "templates list. Download it now; it was not saved."})
+
+    stem = re.sub(r"[^\w.\- ]+", "", fields["employee_name"]).strip() or "Offer Letter"
+    pdf_b64: str | None = None
+    pdf_error: str | None = None
+    if body.include_pdf:
+        try:
+            pdf = await services.render_pdf(result["docx"], f"{stem}.docx")
+            pdf_b64 = base64.b64encode(pdf).decode("ascii")
+        except services.ServiceError as exc:
+            pdf_error = str(exc)
+        except Exception:
+            logger.exception("PDF rendering failed")
+            pdf_error = "The PDF renderer is unavailable. The .docx is still valid."
+
+    return {
+        "ok": True,
+        "filename": f"{stem} - Offer Letter.docx",
+        "docx_b64": base64.b64encode(result["docx"]).decode("ascii"),
+        "pdf_b64": pdf_b64, "pdf_error": pdf_error,
+        "report": result["report"], "warnings": warnings, "saved": saved,
+    }

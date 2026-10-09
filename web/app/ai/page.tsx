@@ -7,6 +7,7 @@ import * as Tabs from '@radix-ui/react-tabs';
 import { Empty, Hint, PageHeader, Section } from '@/components/ui';
 import { AiChat } from '@/components/ai-chat';
 import { AiCompose } from '@/components/ai-compose';
+import { OfferGenerator } from '@/components/offer-generator';
 
 export default function AiStudioPage() {
   const { data: status } = useQuery({ queryKey: ['ai-status'], queryFn: () => api.get('/api/ai/status') });
@@ -20,7 +21,7 @@ export default function AiStudioPage() {
       <Section className="space-y-5">
         <Tabs.Root defaultValue="chat">
           <Tabs.List className="mb-5 flex gap-1 border-b border-line">
-            {[['chat', 'Author by conversation'], ['create', 'One-shot brief'], ['governance', 'Governance & audit']].map(([v, l]) => (
+            {[['chat', 'Author by conversation'], ['create', 'One-shot brief'], ['offer', 'Compose offer'], ['governance', 'Governance & audit']].map(([v, l]) => (
               <Tabs.Trigger key={v} value={v}
                 className="border-b-2 border-transparent px-4 py-2.5 text-sm text-ink2
                            data-[state=active]:border-accent data-[state=active]:font-medium
@@ -30,6 +31,10 @@ export default function AiStudioPage() {
 
           <Tabs.Content value="chat"><AiChat /></Tabs.Content>
           <Tabs.Content value="create"><AiCompose /></Tabs.Content>
+          {/* Kept mounted: a half-filled form (and an open editor) must survive a tab switch. */}
+          <Tabs.Content value="offer" forceMount className="data-[state=inactive]:hidden">
+            <OfferGenerator />
+          </Tabs.Content>
           <Tabs.Content value="governance" className="space-y-5">
         <div className="card p-5">
           <div className="mb-3 flex items-center gap-2">

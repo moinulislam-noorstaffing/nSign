@@ -96,6 +96,7 @@ export default function TemplatesPage() {
                     <td >
                       <Link href={`/templates/${t.id}`} className="flex items-center gap-2 font-medium hover:text-accent">
                         <FileText className="h-4 w-4 text-ink3" />{t.name}
+                        {t.generated && <span className="pill pill-accent ml-2">generated</span>}
                       </Link>
                       <div className="mt-0.5 pl-6 text-[11px] text-ink3">{t.source_filename}</div>
                     </td>
@@ -112,18 +113,7 @@ export default function TemplatesPage() {
                         aria-label={`Delete ${t.name}`}
                         className="rounded-md p-1.5 text-ink3 transition hover:bg-bad/10 hover:text-bad"
                         disabled={remove.isPending}
-                        onClick={() => {
-                          // Name the blast radius. "Delete this?" hides that a
-                          // 94-branch assignment and every stored version go too.
-                          const detail = [
-                            `"${t.name}"`,
-                            `${t.versions.length} version(s)`,
-                            t.branch_count ? `${t.branch_count} branch assignment(s)` : null,
-                          ].filter(Boolean).join(' · ');
-                          if (confirm(`Delete ${detail}?\n\nThe stored .docx is removed from MinIO as well. This cannot be undone.`)) {
-                            remove.mutate(t.id);
-                          }
-                        }}>
+                        onClick={() => remove.mutate(t.id)}>
                         <Trash2 className="h-4 w-4" />
                       </button>
                     </td>

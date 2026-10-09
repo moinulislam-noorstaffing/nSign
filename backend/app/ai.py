@@ -10,6 +10,11 @@ is deliberate rather than incidental. A hallucinated clause in a signed offer
 letter is a contract dispute, and the audit trail would faithfully preserve it
 as the authoritative record of what the company offered.
 
+One operation sits next to the generation flow: `parse_compensation` turns a
+requestor's free text into a STRUCTURED SUGGESTION. It is still not called while
+a document is produced. A person reviews and edits the structure, and only that
+reviewed data reaches `offer_letter.generate`, which never imports this module.
+
 Four safeguards make the suggestions usable rather than merely plausible:
 
   1. STRUCTURED OUTPUT with closed enums. The model selects from the vocabulary
@@ -304,13 +309,18 @@ async def _chat(system: str, user: str, schema: dict[str, Any], schema_name: str
         },
     }
 
-    async with httpx.AsyncClient(timeout=180) as client:
-        response = await client.post(
-            API_URL,
-            headers={"Authorization": f"Bearer {settings.openai_api_key}",
-                     "Content-Type": "application/json"},
-            json=payload,
-        )
+    try:
+        async with httpx.AsyncClient(timeout=180) as client:
+            response = await client.post(
+                API_URL,
+                headers={"Authorization": f"Bearer {settings.openai_api_key}",
+                         "Content-Type": "application/json"},
+                json=payload,
+            )
+    except httpx.TimeoutException as exc:
+        raise AIError("The model took too long to answer. Try again.") from exc
+    except httpx.HTTPError as exc:
+        raise AIError(f"Could not reach the model provider: {type(exc).__name__}.") from exc
 
     if not response.is_success:
         raise AIError(f"OpenAI {response.status_code}: {response.text[:400]}")
@@ -812,3 +822,107 @@ async def chat_turn(*, messages: list[dict[str, str]], reference_text: str = "",
         "Reply to the last AUTHOR message, and return the updated working draft."
     )
     return await _chat(_CHAT_SYSTEM, user, CHAT_SCHEMA, "authoring_turn", max_tokens=24000)
+
+
+# --------------------------------------------------------------------------- #
+#  Compensation — free text in, a STRUCTURED SUGGESTION out
+# --------------------------------------------------------------------------- #
+
+def _nullable_object(properties: dict[str, Any]) -> dict[str, Any]:
+    return {"anyOf": [
+        {"type": "object", "additionalProperties": False,
+         "properties": properties, "required": list(properties)},
+        {"type": "null"},
+    ]}
+
+
+COMPENSATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "base": _nullable_object({
+            "type": {"type": "string", "enum": ["hourly", "salary"]},
+            "amount": {"type": "number"},
+        }),
+        "commission": _nullable_object({
+            "basis": {"type": ["string", "null"]},
+            "tiers": {"type": "array", "items": {
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    "min": {"type": "number"},
+                    "max": {"type": ["number", "null"]},
+                    "rate_pct": {"type": "number"},
+                },
+                "required": ["min", "max", "rate_pct"],
+            }},
+        }),
+        "overtime": _nullable_object({"amount": {"type": "number"}}),
+        "pay_frequency_mentioned": {
+            "type": ["string", "null"],
+            "enum": ["weekly", "biweekly", "semimonthly", "monthly", None],
+        },
+        "needs_review": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "properties": {"field": {"type": "string"}, "issue": {"type": "string"}},
+            "required": ["field", "issue"],
+        }},
+    },
+    "required": ["base", "commission", "overtime", "pay_frequency_mentioned", "needs_review"],
+}
+
+_COMPENSATION_SYSTEM = f"""You turn a requestor's free-text description of a job's pay into a structured record for a US staffing company's offer letter.
+
+You do not write the letter and you do not write legal wording. You extract numbers and structure from the text, and nothing else.
+
+Rules you must not break:
+- Use ONLY what the text says. Copy every figure exactly as written ("150k" is 150000). Never invent, round, or "correct" a figure.
+- A field the text does not mention is null. Do not guess a default.
+- base.type is "hourly" for a per-hour rate and "salary" for an annual figure. If the text gives a weekly or monthly salary, leave base null and say so in needs_review.
+- Commission tiers are inclusive ranges in dollars of the commission basis. When one tier ends where the next begins ("up to 150k", then "150k to 300k"), end the earlier tier one cent below the next start: 149999.99 and 150000. A final tier described as "above X" has max null.
+- commission.basis is the term the text uses for what commission is calculated on. Copy it as written; do not rename it.
+- overtime.amount is a dollar rate per hour. If the text gives only a multiplier ("time and a half"), compute it from the hourly base AND add a needs_review entry saying it was derived.
+- pay_frequency_mentioned is the pay frequency the text states, else null. Never infer it from the job type.
+- Anything ambiguous, contradictory, or unusual goes in needs_review as {{"field", "issue"}}, with the field named like "commission.tiers" or "base.amount". Do not resolve it yourself.
+
+Examples (input -> output):
+
+"$22/hour. Commission on gross profit: 5% for 0 to 149,999.99, 6% for 150,000 to 299,999.99, 7% for 300,000 to 1,000,000. Overtime $33/hour."
+{{"base": {{"type": "hourly", "amount": 22}}, "commission": {{"basis": "Gross Profit", "tiers": [{{"min": 0, "max": 149999.99, "rate_pct": 5}}, {{"min": 150000, "max": 299999.99, "rate_pct": 6}}, {{"min": 300000, "max": 1000000, "rate_pct": 7}}]}}, "overtime": {{"amount": 33}}, "pay_frequency_mentioned": null, "needs_review": []}}
+
+"$70,000 salary, paid biweekly. No commission."
+{{"base": {{"type": "salary", "amount": 70000}}, "commission": null, "overtime": null, "pay_frequency_mentioned": "biweekly", "needs_review": []}}
+
+"$25/hour plus 3% commission on sales"
+{{"base": {{"type": "hourly", "amount": 25}}, "commission": {{"basis": "sales", "tiers": [{{"min": 0, "max": null, "rate_pct": 3}}]}}, "overtime": null, "pay_frequency_mentioned": null, "needs_review": [{{"field": "commission.basis", "issue": "The text says 'sales', not gross profit. A person must confirm the basis."}}]}}
+
+{_INJECTION_GUARD}"""
+
+MAX_COMPENSATION_CHARS = 4000
+
+
+async def parse_compensation(*, text: str, job_title: str = "",
+                             employment_type: str = "") -> dict[str, Any]:
+    """Suggest a structure for a compensation description.
+
+    Only the description, the job title and the employment type are sent. The
+    employee's name, address, email and phone never leave this system for this
+    call — they are filled in afterwards by `offer_letter.generate`.
+    """
+    text = text.strip()
+    if not text:
+        raise AIError("Describe the compensation first.")
+    if len(text) > MAX_COMPENSATION_CHARS:
+        raise AIError(f"The description is longer than {MAX_COMPENSATION_CHARS} characters.")
+    # No override flag here, unlike template analysis: a pay description has no
+    # legitimate reason to contain a phone number or an address.
+    findings = scan_pii(text)
+    if findings:
+        raise PIIFound(findings)
+
+    user = (
+        f"Job title: {job_title or 'not provided'}\n"
+        f"Employment type: {employment_type or 'not provided'}\n\n"
+        f"Compensation description:\n{fence(text, MAX_COMPENSATION_CHARS)}"
+    )
+    return await _chat(_COMPENSATION_SYSTEM, user, COMPENSATION_SCHEMA,
+                       "compensation_parse", max_tokens=1500)

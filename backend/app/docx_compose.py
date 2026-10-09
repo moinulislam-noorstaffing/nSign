@@ -23,8 +23,9 @@ Two operations are supported on top of that:
   * BODY REPLACEMENT from structured blocks — never from raw HTML, because HTML
     would have to be parsed and mapped anyway and a closed block vocabulary is
     something a model can be constrained to emit.
-  * LOGO SUBSTITUTION — swapping the image bytes in place, keeping the part name
-    so every relationship still resolves.
+  * LOGO SUBSTITUTION — delegated to `letter_logo`, the one implementation shared
+    with the offer generator. It fits the new image into the old one's space,
+    renames the part when the format changes and keeps every relationship valid.
 """
 
 from __future__ import annotations
@@ -34,6 +35,8 @@ import re
 import zipfile
 from typing import Any
 from xml.sax.saxutils import escape
+
+from app import letter_logo
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
@@ -152,19 +155,13 @@ def blocks_to_xml(blocks: list[dict[str, Any]], *, bare: bool = True) -> str:
 # --------------------------------------------------------------------------- #
 
 def donor_logo_parts(docx_bytes: bytes) -> list[str]:
-    """Image parts reachable from a header or footer — i.e. the letterhead."""
-    archive = zipfile.ZipFile(io.BytesIO(docx_bytes))
-    targets: list[str] = []
-    for name in archive.namelist():
-        if not _HEADER_RELS.match(name):
-            continue
-        rels = archive.read(name).decode("utf-8", "replace")
-        for target in re.findall(r'Target="([^"]+)"', rels):
-            if "media/" in target:
-                part = target if target.startswith("word/") else f"word/{target.lstrip('/')}"
-                if part not in targets:
-                    targets.append(part)
-    return targets
+    """The letterhead image part, as a list (empty when the donor has none)."""
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(docx_bytes))
+        slot = letter_logo.find_logo(archive.namelist(), archive.read)
+    except (zipfile.BadZipFile, KeyError):
+        return []
+    return [slot.media] if slot else []
 
 
 def uses_braced_placeholders(text: str) -> bool:
@@ -177,7 +174,8 @@ def uses_braced_placeholders(text: str) -> bool:
 
 
 def compose(donor_bytes: bytes, blocks: list[dict[str, Any]], *,
-            logo: bytes | None = None, bare_placeholders: bool = True) -> dict[str, Any]:
+            logo: bytes | None = None, logo_name: str = "",
+            bare_placeholders: bool = True) -> dict[str, Any]:
     """Build a new .docx: the donor's stationery, new body, optionally a new logo."""
     try:
         source = zipfile.ZipFile(io.BytesIO(donor_bytes))
@@ -202,30 +200,49 @@ def compose(donor_bytes: bytes, blocks: list[dict[str, Any]], *,
     new_body = blocks_to_xml(blocks, bare=bare_placeholders).encode("utf-8") + tail
     new_document = document[:match.start(2)] + new_body + document[match.end(2):]
 
-    logo_parts = donor_logo_parts(donor_bytes)
-    replaced_logo = False
+    change: letter_logo.Change | None = None
+    if logo:
+        try:
+            change = letter_logo.replace_logo(source.namelist(), source.read, logo, logo_name)
+        except letter_logo.LogoProblem as exc:
+            # A damaged or unsupported image is the caller's problem to hear about.
+            # A donor with no letterhead logo is not: there is simply nothing to
+            # replace, and the donor's own stationery stays, as it always did.
+            if not exc.template:
+                raise ComposeError(str(exc)) from exc
+    renames = change.renames if change else {}
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out:
         for item in source.infolist():
-            data = source.read(item.filename)
             if item.filename == "word/document.xml":
                 data = new_document
-            elif logo and logo_parts and item.filename == logo_parts[0]:
-                # Same part name, new bytes: every relationship still resolves,
-                # and Word/ONLYOFFICE re-read the dimensions from the image.
-                data = logo
-                replaced_logo = True
-            info = zipfile.ZipInfo(item.filename, date_time=item.date_time)
+            elif change and item.filename in change.media:
+                data = change.media[item.filename]
+            elif change and item.filename in change.edited:
+                data = change.edited[item.filename]
+            else:
+                data = source.read(item.filename)
+            info = zipfile.ZipInfo(renames.get(item.filename, item.filename), date_time=item.date_time)
             info.compress_type = item.compress_type
             info.external_attr = item.external_attr
             out.writestr(info, data)
 
+    if renames:
+        packaged = zipfile.ZipFile(io.BytesIO(buffer.getvalue()))
+        broken = (letter_logo.dangling_relationships(packaged.namelist(), packaged.read)
+                  - letter_logo.dangling_relationships(source.namelist(), source.read))
+        if broken:
+            raise ComposeError("Replacing the logo left a broken reference: " + "; ".join(sorted(broken)[:3]))
+
+    logo_parts = donor_logo_parts(donor_bytes)
     return {
         "docx": buffer.getvalue(),
         "kept_parts": [n for n in source.namelist() if n != "word/document.xml"],
-        "logo_replaced": replaced_logo,
-        "logo_part": logo_parts[0] if logo_parts else None,
+        "logo_replaced": change is not None,
+        "logo_part": change.info["part"] if change else (logo_parts[0] if logo_parts else None),
+        "logo": change.info if change else None,
+        "logo_notes": change.notes if change else [],
         "blocks": len(blocks),
         "section_preserved": bool(tail),
         "placeholder_style": "braced" if not bare_placeholders else "bare",
